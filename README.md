@@ -9,6 +9,8 @@ extension:
 - **Busy indicator.** The tab icon grows a green badge while Claude is actively working,
   so you can tell at a glance which session is still thinking.
 
+![Three Claude Code tabs with hand-typed names; the middle one carries the green busy badge](docs/tabs.png)
+
 | Tab icon | Meaning |
 | --- | --- |
 | `claude-logo.svg` | idle |
