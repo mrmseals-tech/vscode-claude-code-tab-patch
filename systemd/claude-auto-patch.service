@@ -1,0 +1,14 @@
+[Unit]
+Description=Auto-patch Claude Code VS Code extension
+
+[Service]
+Type=oneshot
+# EDIT THIS PATH to point at your checkout of this repo, e.g.
+#   %h/src/vscode-claude-code-tab-patch/auto-patch-claude.sh
+# %h expands to your home directory. systemd does NOT expand ~ or $HOME here,
+# and it will not expand a relative path either — this must be absolute or %h-based.
+ExecStart=%h/CHANGEME/vscode-claude-code-tab-patch/auto-patch-claude.sh
+# Let VS Code finish writing extension files before we touch them.
+ExecStartPre=/usr/bin/sleep 5
+StandardOutput=journal
+StandardError=journal

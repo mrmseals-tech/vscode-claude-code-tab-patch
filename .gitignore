@@ -1,0 +1,13 @@
+# Runtime state — never commit these.
+#
+# The .orig files are verbatim copies of the installed Claude Code extension
+# (~8 MB of Anthropic's code). This repo ships the patcher, never the payload.
+*.orig
+claude-ext-backup/
+backup/
+*.flag
+.version
+
+# Transfer artifacts
+*.bundle
+*.tar.gz

@@ -1,0 +1,11 @@
+[Unit]
+Description=Watch for Claude Code extension updates
+
+[Path]
+PathChanged=%h/.vscode/extensions
+# Small delay to let VS Code finish writing the extension files
+TriggerLimitIntervalSec=60
+TriggerLimitBurst=10
+
+[Install]
+WantedBy=default.target
