@@ -11,6 +11,30 @@
 # SAFETY: Backs up originals first. If things break, run:
 #   ./claude-rollback.sh          (sits next to this script)
 # Then reload VS Code: Ctrl+Shift+P -> Developer: Reload Window
+#
+# IDENTIFIER CHARSET — why every anchor captures [\w\$]+ and never \w+:
+# A minified JS identifier may be any of [A-Za-z0-9_$], and "$" is a perfectly
+# ordinary name that bundlers do emit. Perl's \w is [A-Za-z0-9_] — it does NOT
+# match "$" — so an anchor written with \w+ silently stops matching the moment
+# upstream's minifier hands the binding we anchor on the name "$".
+#
+# That is not hypothetical. Extension 2.1.239 was minified to terser-style names
+# (e, t, i, Fe); 2.1.245 switched to esbuild-style names, where both the message
+# handler parameter and the ExtensionContext became "$". Steps 3, 4, 5 and 6 all
+# failed at once with "could not detect variable names", while Steps 2, 7 and 8
+# applied cleanly — leaving extension.js completely vanilla with webview/index.js
+# and package.json patched, i.e. a "Rename Tab" command in the palette with no
+# handler behind it. Step 2 had been hardened for this earlier (note its
+# [^\s,)]+ param captures); Steps 3-6 had not.
+#
+# Rule: anywhere a MINIFIED identifier is matched or captured, use [\w\$]+ (or
+# [^\s,)]+ for a parameter list). Never \w+. This applies equally to the
+# already-patched guards — a guard that cannot recognise its own output makes the
+# script double-inject on re-run — and to the markers in claude-patch-markers.sh,
+# which would otherwise report MISSING on a correctly patched file.
+#
+# Note the backslash before the $: in a Perl character class a bare [\w$] would
+# interpolate $], the Perl version variable.
 
 set -euo pipefail
 
@@ -124,7 +148,7 @@ perl -e '
   my $patched = 0;
 
   # Pattern A (old): this.hasUnseenCompletion.value passed inline
-  if ($c =~ /(\w+)\.renameTab\((\w+),(\w+),this\.hasUnseenCompletion\.value\)/) {
+  if ($c =~ /([\w\$]+)\.renameTab\(([\w\$]+),([\w\$]+),this\.hasUnseenCompletion\.value\)/) {
     my $target_pos = $-[0];
     my ($conn, $title, $perm) = ($1, $2, $3);
     # Scope-aware: pick the CLOSEST preceding "let X=this.activeSession.value",
@@ -137,7 +161,7 @@ perl -e '
     # actually nearest to (and therefore in scope at) the renameTab call.
     my $prefix = substr($c, 0, $target_pos);
     my $session_var;
-    while ($prefix =~ /let (\w+)=this\.activeSession\.value/g) {
+    while ($prefix =~ /let ([\w\$]+)=this\.activeSession\.value/g) {
       $session_var = $1;
     }
     if (!$session_var) {
@@ -155,7 +179,7 @@ perl -e '
 
   # Pattern B (new): hasUnseenCompletion.value assigned to var, then var passed in renameTab via untracked wrapper
   # IMPORTANT: busy.value must be read OUTSIDE the Nk/untracked wrapper so the reactive system tracks it
-  if (!$patched && $c =~ /(\w+)=this\.hasUnseenCompletion\.value;.*?(\w+)\(\(\)=>(\w+)\.renameTab\((\w+),(\w+),\1\)\)/s) {
+  if (!$patched && $c =~ /([\w\$]+)=this\.hasUnseenCompletion\.value;.*?([\w\$]+)\(\(\)=>([\w\$]+)\.renameTab\(([\w\$]+),([\w\$]+),\1\)\)/s) {
     my $target_pos = $-[0];
     my ($unseen_var, $wrapper, $conn, $title, $perm) = ($1, $2, $3, $4, $5);
     # Scope-aware: same fix as pattern A above — take the CLOSEST preceding
@@ -163,7 +187,7 @@ perl -e '
     # call site), not the first one in the whole file.
     my $prefix = substr($c, 0, $target_pos);
     my $session_var;
-    while ($prefix =~ /let (\w+)=this\.activeSession\.value/g) {
+    while ($prefix =~ /let ([\w\$]+)=this\.activeSession\.value/g) {
       $session_var = $1;
     }
     if (!$session_var) {
@@ -201,7 +225,7 @@ perl -e '
     exit 0;
   }
 
-  if ($c =~ /renameTab=\(([^\s,)]+),([^\s,)]+),([^\s,)]+)\)=>\{let (\w+)=this\.comms\.connection\.value;if\(\4&&\4\.config\.value\?\.openNewInTab\)return \4\.renameTab\(\1,\2,\3\),!0;return!1\}/) {
+  if ($c =~ /renameTab=\(([^\s,)]+),([^\s,)]+),([^\s,)]+)\)=>\{let ([\w\$]+)=this\.comms\.connection\.value;if\(\4&&\4\.config\.value\?\.openNewInTab\)return \4\.renameTab\(\1,\2,\3\),!0;return!1\}/) {
     my ($p1, $p2, $p3, $cv) = ($1, $2, $3, $4);
     my $p4 = "W";
 
@@ -233,7 +257,7 @@ perl -e '
     exit 0;
   }
 
-  if ($c =~ /(\w+)\.request\.hasPendingPermissions\)(\w+)="claude-logo-pending\.svg"/) {
+  if ($c =~ /([\w\$]+)\.request\.hasPendingPermissions\)([\w\$]+)="claude-logo-pending\.svg"/) {
     my ($req_var, $icon_var) = ($1, $2);
     my $old = qq{else if(${req_var}.request.hasUnseenCompletion)${icon_var}="claude-logo-done.svg";else ${icon_var}="claude-logo.svg"};
     my $new = qq{else if(${req_var}.request.hasUnseenCompletion)${icon_var}="claude-logo-done.svg";else if(${req_var}.request.isBusy)${icon_var}="claude-logo-busy.svg";else ${icon_var}="claude-logo.svg"};
@@ -257,12 +281,12 @@ echo "Patching extension.js for rename tab..."
 perl -e '
   open F, "<", $ARGV[0] or die; local $/; $c = <F>; close F;
 
-  if ($c =~ /_customTitle\|\|\w+\.request\.title/) {
+  if ($c =~ /_customTitle\|\|[\w\$]+\.request\.title/) {
     print STDERR "  - sticky custom title: already patched\n";
     exit 0;
   }
 
-  if ($c =~ /(\w+)\.request\.type==="rename_tab"/) {
+  if ($c =~ /([\w\$]+)\.request\.type==="rename_tab"/) {
     my $req_var = $1;
     my $old = "this.panelTab.title=${req_var}.request.title";
     my $new = "this.panelTab.title=this._customTitle||${req_var}.request.title";
@@ -289,7 +313,7 @@ perl -e '
     exit 0;
   }
 
-  if ($c =~ /(\w+)\.subscriptions\.push\((\w+)\.commands\.registerCommand\("claude-vscode\.newConversation",async\(\)=>\{(\w+)\.notifyCreateNewConversation\(\)\}\)\)([;,])/) {
+  if ($c =~ /([\w\$]+)\.subscriptions\.push\(([\w\$]+)\.commands\.registerCommand\("claude-vscode\.newConversation",async\(\)=>\{([\w\$]+)\.notifyCreateNewConversation\(\)\}\)\)([;,])/) {
     my ($ctx_var, $vscode_var, $comms_var, $sep) = ($1, $2, $3, $4);
     my $anchor = qq{${ctx_var}.subscriptions.push(${vscode_var}.commands.registerCommand("claude-vscode.newConversation",async()=>{${comms_var}.notifyCreateNewConversation()}))${sep}};
     my $inject = qq{${ctx_var}.subscriptions.push(${vscode_var}.commands.registerCommand("claude-vscode.renameTab",async()=>{for(let ct of ${comms_var}.allComms){if(ct.panelTab&&ct.panelTab.visible){let nm=await ${vscode_var}.window.showInputBox({prompt:"Enter tab name (empty to reset)"});if(nm===void 0)break;let titles=${ctx_var}.globalState.get("customTabTitles")||[];if(nm===""){titles=titles.filter(t=>t!==ct._customTitle);ct._customTitle=null;ct.panelTab.title="Claude Code"}else{if(ct._customTitle)titles=titles.filter(t=>t!==ct._customTitle);titles.push(nm);ct._customTitle=nm;ct.panelTab.title=nm}${ctx_var}.globalState.update("customTabTitles",titles);break}}}))${sep}};
@@ -376,7 +400,7 @@ perl -e '
   # Primary anchor: the webviews-registry literal, order-independent. The
   # lookbehind only asserts a statement boundary so that injecting a bare block
   # in front of it stays valid JS — it does NOT assume which statement that is.
-  my $registry_re = qr/(?<=[;}])(let \w+=\{isVisible:\(\)=>(?<panel>\w+)\.visible,isChatSurface:!0,reveal:\(\)=>\k<panel>\.reveal\(\),comms:(?<comms>\w+)\})/;
+  my $registry_re = qr/(?<=[;}])(let [\w\$]+=\{isVisible:\(\)=>(?<panel>[\w\$]+)\.visible,isChatSurface:!0,reveal:\(\)=>\k<panel>\.reveal\(\),comms:(?<comms>[\w\$]+)\})/;
 
   # Count MATCHES, not capture groups. "my $n = () = (/re/g)" counts the flattened
   # capture list, so a single match with three groups reports 3 and would trip the
@@ -392,7 +416,7 @@ perl -e '
     ($form, $panel_var, $comms_var) = ("registry", $+{panel}, $+{comms});
     $old = $1;
     $new = restore_block($panel_var, $comms_var) . $1;
-  } elsif ($c =~ /(\w+)\.reveal\(\),.+?this\.allComms\.add\((\w+)\),\1\.webview\.onDidReceiveMessage/s) {
+  } elsif ($c =~ /([\w\$]+)\.reveal\(\),.+?this\.allComms\.add\(([\w\$]+)\),\1\.webview\.onDidReceiveMessage/s) {
     ($form, $panel_var, $comms_var) = ("adjacency", $1, $2);
     $old = "this.allComms.add(${comms_var}),${panel_var}.webview.onDidReceiveMessage";
     $new = "this.allComms.add(${comms_var});" . restore_block($panel_var, $comms_var)

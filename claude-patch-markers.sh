@@ -54,7 +54,10 @@ claude_check_markers() {
 
     # --- extension.js ---
     _cm_grep "$extension" 'claude-logo-busy\.svg'                               "extension: busy icon selection"
-    _cm_grep "$extension" '_customTitle\|\|\w+\.request\.title'                 "extension: sticky custom title"
+    # [\w\$]+ not \w+: a minified identifier can be "$" (esbuild names the message
+    # handler binding "$" as of 2.1.245), which \w does not match. Same reason as
+    # the IDENTIFIER CHARSET note in patch-claude-busy-indicator.sh.
+    _cm_grep "$extension" '_customTitle\|\|[\w\$]+\.request\.title'            "extension: sticky custom title"
     _cm_grep "$extension" 'claude-vscode\.renameTab'                            "extension: renameTab command registered"
     # Anchored on "_st" — the literal, hardcoded local var name Step 6 uses in its
     # injected restore block (this._st, not a minified-per-version placeholder).
