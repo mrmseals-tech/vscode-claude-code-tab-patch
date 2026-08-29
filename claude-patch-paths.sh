@@ -37,5 +37,11 @@ CLAUDE_PATCH_EXT_PATTERN="${CLAUDE_PATCH_EXT_PATTERN:-anthropic.claude-code-*}"
 # claude_find_ext — echo the newest installed Claude Code extension directory,
 # or nothing at all when none is present. Callers decide whether that is fatal.
 claude_find_ext() {
-    find "$CLAUDE_PATCH_EXT_DIR" -maxdepth 1 -type d -name "$CLAUDE_PATCH_EXT_PATTERN" 2>/dev/null | sort -V | tail -1
+    # The trailing "|| true" matters: callers run under "set -e -o pipefail"
+    # and take this through a command substitution, so a non-zero find aborts
+    # their ENTIRE script with no message and no trace. find returns 1 for
+    # reasons unrelated to the result, e.g. "Failed to restore initial working
+    # directory" when invoked from a cwd the running user cannot read. Report
+    # nothing found and let the caller produce the real diagnostic.
+    find "$CLAUDE_PATCH_EXT_DIR" -maxdepth 1 -type d -name "$CLAUDE_PATCH_EXT_PATTERN" 2>/dev/null | sort -V | tail -1 || true
 }
