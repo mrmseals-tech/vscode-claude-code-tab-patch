@@ -51,6 +51,16 @@ claude_check_markers() {
     # _isBusy before the untracked wrapper. Either form is correctly patched.
     _cm_grep "$webview"   '_isBusy=.*?busy\.value|\.renameTab\([^)]*busy\.value' "webview: reactive watcher passes busy.value"
     _cm_grep "$webview"   'renameTab=\([^)]+,[^)]+,[^)]+,[^)]+\)=>'              "webview: renameTab wrapper has 4 params"
+    # Background-subagent arm (Edits B/D/E/F). session.busy alone goes false at
+    # the result bookend, so an async subagent that outlives its parent turn is
+    # invisible to the tab; these four assert the _bgBusy path that covers it.
+    # All four must hold together — _bgBusy without its feed is a dead signal,
+    # and the feed without the renameTab arm never reaches the badge, so a
+    # partial application has to read as MISSING rather than as patched.
+    _cm_grep "$webview"   '_bgBusy=[\w\$]+\(!1\)'                                "webview: session has _bgBusy signal"
+    _cm_grep "$webview"   'background_tasks_changed"\)this\._bgBusy\.value='     "webview: background_tasks_changed feeds _bgBusy"
+    _cm_grep "$webview"   '_bgBusy\.value\?\?!1\)'                               "webview: renameTab busy includes background work"
+    _cm_grep "$webview"   'resetPerProcessState\(\)\{if\(this\._bgBusy\.value=!1' "webview: _bgBusy cleared on process end"
 
     # --- extension.js ---
     _cm_grep "$extension" 'claude-logo-busy\.svg'                               "extension: busy icon selection"

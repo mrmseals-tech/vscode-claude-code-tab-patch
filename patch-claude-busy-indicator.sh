@@ -136,12 +136,62 @@ perl -e '
 # Edit B: Pass busy.value in reactive watcher
 # Pattern A (old): CONN.renameTab(TITLE,PERM,this.hasUnseenCompletion.value)
 # Pattern B (new): VAR=this.hasUnseenCompletion.value;Nk(()=>CONN.renameTab(TITLE,PERM,VAR))
+#
+# WHY THIS IS NOT JUST session.busy — background subagents:
+# upstream drives session.busy from the SDK stream bookends ONLY:
+#   system/init -> busy=true ... result -> busy=false
+# An async subagent (the Agent tool default, "Async agent launched successfully")
+# OUTLIVES the turn that spawned it: the parent stops talking, emits result, and
+# busy goes false while the subagent is still working — the parent only wakes
+# again when a task-notification arrives. For that whole window the tab reported
+# isBusy:false and the badge cleared, which is the "does not detect subagent
+# work" report. Verified in the extension log against a real run: three async
+# agents launched 10:39-10:40Z, parent turn ended, session went idle at 10:45:00Z,
+# task-notification at 10:47:41Z put it back to running — 2m41s of invisible work.
+#
+# session.subagentTasks cannot fill the gap either: upstream CLEARS that map on
+# result, and handleTaskProgress early-returns for a task id it does not already
+# hold, so it can never repopulate afterwards.
+#
+# So arg 4 is "main loop busy OR live background work", where the second half is
+# _bgBusy — a signal Edits D/E/F add, fed by the system/background_tasks_changed
+# event that upstream documents for exactly this purpose ("consumers that only
+# need is background work running should replace their set with each payload").
 perl -e '
   open F, "<", $ARGV[0] or die; local $/; $c = <F>; close F;
 
-  # Check if already patched: busy.value read before the untracked wrapper, or inside renameTab call
-  if ($c =~ /_isBusy=.*?busy\.value.*?renameTab\([^)]*_isBusy/ || $c =~ /\.renameTab\([^)]*busy\.value/) {
-    print STDERR "  - reactive watcher: already patched\n";
+  # Arg 4 of renameTab: main-loop busy OR live background subagent work.
+  sub busy_expr { my ($s) = @_; return "(${s}?.busy.value??!1)||(${s}?._bgBusy.value??!1)"; }
+
+  # Already patched with the CURRENT, background-aware expression?
+  if ($c =~ /_bgBusy\.value\?\?!1\)/) {
+    print STDERR "  - reactive watcher: already patched (background-aware)\n";
+    exit 0;
+  }
+
+  # Patched by an OLDER version of this script (main-loop busy only)? Upgrade in
+  # place — an installed extension must not need a rollback+repatch to gain the
+  # background-aware arm. Both old forms end in "SESSION?.busy.value??!1", so
+  # anchor on the text that PRECEDES it: vanilla contains that exact substring a
+  # few statements away, in the hasUnseenCompletion watcher
+  # ("let G=this.activeSession.value,...,U=G?.busy.value??!1"), and an unanchored
+  # match would rewrite that instead.
+  my $upgraded = 0;
+  foreach my $pre ("_isBusy=", "this.hasUnseenCompletion.value,") {
+    next if $upgraded;
+    my $pre_re = quotemeta($pre);
+    if ($c =~ /$pre_re([\w\$]+)\?\.busy\.value\?\?!1/) {
+      my $sess = $1;
+      my $old_re = quotemeta($pre . "${sess}?.busy.value??!1");
+      my $new = $pre . busy_expr($sess);
+      if ($c =~ s/$old_re/$new/) {
+        $upgraded = 1;
+        print STDERR "  - reactive watcher upgraded to background-aware (session=$sess)\n";
+      }
+    }
+  }
+  if ($upgraded) {
+    open F, ">", $ARGV[0] or die; print F $c; close F;
     exit 0;
   }
 
@@ -169,7 +219,7 @@ perl -e '
       exit 1;
     }
     my $old = "${conn}.renameTab(${title},${perm},this.hasUnseenCompletion.value)";
-    my $new = "${conn}.renameTab(${title},${perm},this.hasUnseenCompletion.value,${session_var}?.busy.value??!1)";
+    my $new = "${conn}.renameTab(${title},${perm},this.hasUnseenCompletion.value," . busy_expr($session_var) . ")";
     my $old_re = quotemeta($old);
     if ($c =~ s/$old_re/$new/) {
       $patched = 1;
@@ -194,10 +244,12 @@ perl -e '
       print STDERR "  *** reactive watcher: could not detect session variable (pattern B)\n";
       exit 1;
     }
-    # Read busy.value BEFORE the untracked wrapper so p4() reactive effect tracks it
+    # Read the busy signals BEFORE the untracked wrapper so p4() reactive effect
+    # tracks BOTH of them — a read inside the wrapper is untracked, and the tab
+    # would then never repaint when only the background half changes.
     my $old = "${unseen_var}=this.hasUnseenCompletion.value;${wrapper}(()=>${conn}.renameTab(${title},${perm},${unseen_var}))";
     my $busy_var = "_isBusy";
-    my $new = "${unseen_var}=this.hasUnseenCompletion.value,${busy_var}=${session_var}?.busy.value??!1;${wrapper}(()=>${conn}.renameTab(${title},${perm},${unseen_var},${busy_var}))";
+    my $new = "${unseen_var}=this.hasUnseenCompletion.value,${busy_var}=" . busy_expr($session_var) . ";${wrapper}(()=>${conn}.renameTab(${title},${perm},${unseen_var},${busy_var}))";
     my $old_re = quotemeta($old);
     if ($c =~ s/$old_re/$new/) {
       $patched = 1;
@@ -244,6 +296,114 @@ perl -e '
     exit 1;
   }
 ' "$WEBVIEW" || fail "Edit C: renameTab wrapper"
+
+# Edit D: Add the _bgBusy signal to the session class
+# Sits next to upstream's own "busy" signal so it is created by every code path
+# that builds a session (the constructor runs class fields; fromServer and
+# fromStateInfo both go through "new"). The signal factory name is captured from
+# the busy declaration rather than assumed, since it is minified.
+perl -e '
+  open F, "<", $ARGV[0] or die; local $/; $c = <F>; close F;
+
+  if ($c =~ /_bgBusy=[\w\$]+\(!1\)/) {
+    print STDERR "  - _bgBusy signal: already patched\n";
+    exit 0;
+  }
+
+  # busy and pendingInput are declared adjacently in the session class. Requiring
+  # BOTH, with a back-reference on the factory, pins the session class rather than
+  # matching any incidental "busy=X(!1)" elsewhere in the bundle.
+  if ($c =~ /busy=([\w\$]+)\(!1\);pendingInput=\1\(!1\)/) {
+    my $sig = $1;
+    my $old = "busy=${sig}(!1);pendingInput=${sig}(!1)";
+    my $new = "busy=${sig}(!1);_bgBusy=${sig}(!1);pendingInput=${sig}(!1)";
+    my $old_re = quotemeta($old);
+    if ($c =~ s/$old_re/$new/) {
+      open F, ">", $ARGV[0] or die; print F $c; close F;
+      print STDERR "  - _bgBusy signal added (factory=$sig)\n";
+    } else {
+      print STDERR "  *** _bgBusy signal: substitution failed\n";
+      exit 1;
+    }
+  } else {
+    print STDERR "  *** _bgBusy signal: could not detect the session busy declaration\n";
+    exit 1;
+  }
+' "$WEBVIEW" || fail "Edit D: _bgBusy session signal"
+
+# Edit E: Feed _bgBusy from system/background_tasks_changed
+# Upstream ships this event specifically for host activity indicators:
+#   {type:"system",subtype:"background_tasks_changed",
+#    tasks:[{task_id,task_type,description,ambient?}]}
+#   "Every live background task after the change. REPLACE semantics: swap your
+#    set for this payload." ... "A level signal, unlike the task_started/
+#    task_notification edge bookends: consumers that only need is background work
+#    running should replace their set with each payload rather than pairing
+#    edges, so a missed bookend cannot wedge a stale running indicator."
+# Neither webview/index.js nor extension.js consumes it today, which is why the
+# information never reaches the tab. Level semantics also mean this cannot latch
+# on: every membership change re-sends the FULL set, and the last one is empty.
+#
+# ambient entries are excluded on upstream instruction: "True for housekeeping
+# tasks the CLI does not surface as user work (every skip_transcript task, plus
+# auto-started live-update watchers); hosts should exclude them from activity
+# indicators."
+#
+# Injected as a new arm on the existing system-subtype chain, immediately after
+# task_notification and before the result arm. No other message shape can reach
+# it, so no previously-handled message changes route.
+perl -e '
+  open F, "<", $ARGV[0] or die; local $/; $c = <F>; close F;
+
+  if ($c =~ /background_tasks_changed"\)this\._bgBusy\.value=/) {
+    print STDERR "  - background_tasks_changed handler: already patched\n";
+    exit 0;
+  }
+
+  if ($c =~ /else if\(([\w\$]+)\.type==="system"&&\1\.subtype==="task_notification"\)this\.handleTaskNotification\(\1\);/) {
+    my $m = $1;
+    my $anchor = "else if(${m}.type===\"system\"&&${m}.subtype===\"task_notification\")this.handleTaskNotification(${m});";
+    my $inject = "else if(${m}.type===\"system\"&&${m}.subtype===\"background_tasks_changed\")"
+               . "this._bgBusy.value=Array.isArray(${m}.tasks)&&${m}.tasks.some((_bt)=>_bt&&!_bt.ambient);";
+    my $anchor_re = quotemeta($anchor);
+    if ($c =~ s/$anchor_re/$anchor$inject/) {
+      open F, ">", $ARGV[0] or die; print F $c; close F;
+      print STDERR "  - background_tasks_changed handler added (msg=$m)\n";
+    } else {
+      print STDERR "  *** background_tasks_changed handler: substitution failed\n";
+      exit 1;
+    }
+  } else {
+    print STDERR "  *** background_tasks_changed handler: could not detect the task_notification arm\n";
+    exit 1;
+  }
+' "$WEBVIEW" || fail "Edit E: background_tasks_changed handler"
+
+# Edit F: Clear _bgBusy when the Claude process goes away
+# Background tasks belong to the CLI process that owns them, so a process that
+# ends takes its tasks with it. Upstream calls resetPerProcessState() from the
+# readMessages finally block (stream ended) and on restart, and already clears
+# busy and subagentTasks there. Without this the badge could stay lit after a
+# crash that never delivers the closing background_tasks_changed.
+perl -e '
+  open F, "<", $ARGV[0] or die; local $/; $c = <F>; close F;
+
+  if ($c =~ /resetPerProcessState\(\)\{if\(this\._bgBusy\.value=!1/) {
+    print STDERR "  - _bgBusy reset: already patched\n";
+    exit 0;
+  }
+
+  my $old = "resetPerProcessState(){if(this.busy.value=!1,";
+  my $new = "resetPerProcessState(){if(this._bgBusy.value=!1,this.busy.value=!1,";
+  my $old_re = quotemeta($old);
+  if ($c =~ s/$old_re/$new/) {
+    open F, ">", $ARGV[0] or die; print F $c; close F;
+    print STDERR "  - _bgBusy reset added\n";
+  } else {
+    print STDERR "  *** _bgBusy reset: resetPerProcessState anchor not found\n";
+    exit 1;
+  }
+' "$WEBVIEW" || fail "Edit F: _bgBusy reset on process end"
 
 # --- Step 3: Patch extension.js ---
 echo "Patching extension.js..."
