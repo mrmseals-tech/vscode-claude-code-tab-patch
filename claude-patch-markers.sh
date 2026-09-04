@@ -63,6 +63,14 @@ claude_check_markers() {
     _cm_grep "$webview"   'resetPerProcessState\(\)\{if\(this\._bgBusy\.value=!1' "webview: _bgBusy cleared on process end"
 
     # --- extension.js ---
+    # Step 3a's feed, asserted separately from the branch it feeds. 2.1.260
+    # hoisted icon selection into applyTabIcon(), which reads a STORED
+    # this.lastRenameTabFlags that upstream fills with its own two flags only —
+    # so a busy branch without isBusy in that object is a dead test that can
+    # never fire, and the marker below would pass straight over it. The second
+    # alternative covers the pre-2.1.260 inline shape, where the branch reads
+    # the request field directly and no flags object exists.
+    _cm_grep "$extension" 'lastRenameTabFlags=\{[^}]*isBusy:|\.request\.isBusy\)[\w\$]+="claude-logo-busy\.svg"' "extension: isBusy reaches icon selection"
     _cm_grep "$extension" 'claude-logo-busy\.svg'                               "extension: busy icon selection"
     # [\w\$]+ not \w+: a minified identifier can be "$" (esbuild names the message
     # handler binding "$" as of 2.1.245), which \w does not match. Same reason as

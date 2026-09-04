@@ -405,10 +405,43 @@ perl -e '
   }
 ' "$WEBVIEW" || fail "Edit F: _bgBusy reset on process end"
 
-# --- Step 3: Patch extension.js ---
+# --- Step 3: Patch extension.js — busy icon ---
+# 2.1.260 moved the goalposts: upstream hoisted icon selection out of the
+# rename_tab message handler into a new applyTabIcon() method that reads a
+# STORED flags object (this.lastRenameTabFlags), set from the request. Two
+# consequences, and a patch that fixes only the first is worse than useless:
+#   a) the handler stores ONLY hasPendingPermissions + hasUnseenCompletion, so
+#      isBusy is discarded before applyTabIcon() ever runs -> the busy branch
+#      would be a dead test that can never be true;
+#   b) the branch itself now reads "$?.hasPendingPermissions" (optional chain,
+#      no ".request." prefix), so the old single anchor stopped matching and
+#      Step 3 failed with "could not detect variable names" on 2.1.260.
+# Hence 3a (feed) then 3b (consumer), each with its own marker.
 echo "Patching extension.js..."
 
-# Dynamically detect the minified request variable name (changes between versions)
+# Step 3a: carry isBusy into the stored flags object (2.1.260+ shape only).
+perl -e '
+  open F, "<", $ARGV[0] or die; local $/; $c = <F>; close F;
+
+  if ($c !~ /lastRenameTabFlags=\{/) {
+    print STDERR "  - busy flag store: n/a (pre-2.1.260 inline shape)\n";
+    exit 0;
+  }
+  if ($c =~ /lastRenameTabFlags=\{[^}]*isBusy:/) {
+    print STDERR "  - busy flag store: already patched\n";
+    exit 0;
+  }
+  if ($c =~ s/(lastRenameTabFlags=\{hasPendingPermissions:([\w\$]+)\.request\.hasPendingPermissions,hasUnseenCompletion:\2\.request\.hasUnseenCompletion)\}/$1,isBusy:$2.request.isBusy}/) {
+    open F, ">", $ARGV[0] or die; print F $c; close F;
+    print STDERR "  - busy flag store patched (req=$2)\n";
+  } else {
+    print STDERR "  *** busy flag store: could not detect lastRenameTabFlags shape\n";
+    exit 1;
+  }
+' "$EXTENSION" || fail "Step 3a: isBusy in lastRenameTabFlags (extension.js)"
+
+# Step 3b: add the busy branch to the icon selection.
+# Dynamically detect the minified variable names (they change between versions)
 perl -e '
   open F, "<", $ARGV[0] or die; local $/; $c = <F>; close F;
 
@@ -417,14 +450,20 @@ perl -e '
     exit 0;
   }
 
-  if ($c =~ /([\w\$]+)\.request\.hasPendingPermissions\)([\w\$]+)="claude-logo-pending\.svg"/) {
-    my ($req_var, $icon_var) = ($1, $2);
-    my $old = qq{else if(${req_var}.request.hasUnseenCompletion)${icon_var}="claude-logo-done.svg";else ${icon_var}="claude-logo.svg"};
-    my $new = qq{else if(${req_var}.request.hasUnseenCompletion)${icon_var}="claude-logo-done.svg";else if(${req_var}.request.isBusy)${icon_var}="claude-logo-busy.svg";else ${icon_var}="claude-logo.svg"};
+  # One anchor, both upstream shapes — capture the flags ACCESSOR whole so the
+  # injected test is written in the same dialect as the branches around it:
+  #   <= 2.1.251  "$.request" . hasPendingPermissions  (inline in the handler)
+  #   >= 2.1.260  "$?"        . hasPendingPermissions  (applyTabIcon())
+  # The done-branch condition is captured too: 2.1.260 hoisted it into a local
+  # ("else if(J)") instead of testing the request field inline.
+  if ($c =~ /([\w\$]+(?:\.request|\?))\.hasPendingPermissions\)([\w\$]+)="claude-logo-pending\.svg";else if\(([^()]+)\)\2="claude-logo-done\.svg";else \2="claude-logo\.svg"/) {
+    my ($flags_acc, $icon_var, $done_cond) = ($1, $2, $3);
+    my $old = qq{else if(${done_cond})${icon_var}="claude-logo-done.svg";else ${icon_var}="claude-logo.svg"};
+    my $new = qq{else if(${done_cond})${icon_var}="claude-logo-done.svg";else if(${flags_acc}.isBusy)${icon_var}="claude-logo-busy.svg";else ${icon_var}="claude-logo.svg"};
     my $old_re = quotemeta($old);
     if ($c =~ s/$old_re/$new/) {
       open F, ">", $ARGV[0] or die; print F $c; close F;
-      print STDERR "  - icon selection patched (req=$req_var, icon=$icon_var)\n";
+      print STDERR "  - icon selection patched (flags=$flags_acc, icon=$icon_var)\n";
     } else {
       print STDERR "  *** icon selection: substitution failed\n";
       exit 1;
@@ -433,7 +472,7 @@ perl -e '
     print STDERR "  *** icon selection: could not detect variable names\n";
     exit 1;
   }
-' "$EXTENSION" || fail "Step 3: icon selection in extension.js"
+' "$EXTENSION" || fail "Step 3b: icon selection in extension.js"
 
 # --- Step 4: Patch extension.js — sticky custom title for rename tab ---
 echo "Patching extension.js for rename tab..."

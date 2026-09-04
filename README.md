@@ -79,7 +79,7 @@ Or just re-run `./patch-claude-busy-indicator.sh` by hand. It is idempotent.
 ## Verify and roll back
 
 ```bash
-./verify-claude-patch.sh   # asserts all 10 markers; exit 0 = healthy
+./verify-claude-patch.sh   # asserts all 15 markers; exit 0 = healthy
 ./claude-rollback.sh       # restore vanilla files, then reload VS Code
 ```
 
