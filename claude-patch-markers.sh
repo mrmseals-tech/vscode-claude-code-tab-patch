@@ -36,6 +36,17 @@ claude_check_markers() {
             CLAUDE_MARKERS_MISSING=$((CLAUDE_MARKERS_MISSING + 1))
         fi
     }
+    # Multiline variant. With -z the whole file is a single record, so \s* can
+    # span newlines — needed to assert a JSON object's shape rather than a bare
+    # substring that a different block could satisfy.
+    _cm_grepz() {  # file pattern label
+        if grep -qPz "$2" "$1" 2>/dev/null; then
+            [[ "$quiet" == "quiet" ]] || echo "  OK:      $3"
+        else
+            echo "  MISSING: $3"
+            CLAUDE_MARKERS_MISSING=$((CLAUDE_MARKERS_MISSING + 1))
+        fi
+    }
     _cm_file() {  # path label
         if [[ -f "$1" ]]; then
             [[ "$quiet" == "quiet" ]] || echo "  OK:      $2"
@@ -71,11 +82,24 @@ claude_check_markers() {
     # alternative covers the pre-2.1.260 inline shape, where the branch reads
     # the request field directly and no flags object exists.
     _cm_grep "$extension" 'lastRenameTabFlags=\{[^}]*isBusy:|\.request\.isBusy\)[\w\$]+="claude-logo-busy\.svg"' "extension: isBusy reaches icon selection"
-    _cm_grep "$extension" 'claude-logo-busy\.svg'                               "extension: busy icon selection"
+    # 2.1.261 replaced the if/else icon chain with a classifier returning a KEY
+    # plus a lookup table, so the busy icon now takes TWO edits that must be
+    # asserted separately. Either half alone is a broken patch that the old
+    # single 'claude-logo-busy.svg' marker would have passed over: a table entry
+    # with no arm returning "busy" is a dead branch, and an arm with no table
+    # entry resolves to undefined and throws on the icon path. Second
+    # alternative in each is the pre-2.1.261 inline shape, where one assignment
+    # is genuinely both halves.
+    _cm_grep "$extension" 'busy:"claude-logo-busy\.svg"|="claude-logo-busy\.svg"'  "extension: busy icon selection"
+    _cm_grep "$extension" 'isBusy\)return"busy"|\.isBusy\)[\w\$]+="claude-logo-busy\.svg"' "extension: busy branch reaches icon"
     # [\w\$]+ not \w+: a minified identifier can be "$" (esbuild names the message
     # handler binding "$" as of 2.1.245), which \w does not match. Same reason as
     # the IDENTIFIER CHARSET note in patch-claude-busy-indicator.sh.
-    _cm_grep "$extension" '_customTitle\|\|[\w\$]+\.request\.title'            "extension: sticky custom title"
+    # The optional (?:[\w\$]+\()? is 2.1.261: upstream wraps the incoming title in
+    # a clamp helper, gJ($.request.title). Step 4 keeps that wrapper on the
+    # fallback arm, so the patched text reads _customTitle||gJ($.request.title)
+    # and a marker demanding the bare form would report MISSING on a good patch.
+    _cm_grep "$extension" '_customTitle\|\|(?:[\w\$]+\()?[\w\$]+\.request\.title'  "extension: sticky custom title"
     _cm_grep "$extension" 'claude-vscode\.renameTab'                            "extension: renameTab command registered"
     # Anchored on "_st" — the literal, hardcoded local var name Step 6 uses in its
     # injected restore block (this._st, not a minified-per-version placeholder).
@@ -91,7 +115,12 @@ claude_check_markers() {
     # command def, never in the menu entry. A bare "claude-vscode.renameTab" match
     # would also hit the menu entry and mask a missing definition (the 2.1.167 bug).
     _cm_grep "$package"   'Claude Code: Rename Tab'                             "package.json: renameTab command DEF (title)"
-    _cm_grep "$package"   'editor/title/context'                               "package.json: right-click context menu"
+    # NOT the bare section name: 2.1.261 ships its own "editor/title/context"
+    # section, so that string is present on a completely unpatched file — a
+    # false pass that hid Step 8 doing nothing. The trailing "when" is what
+    # separates a MENU ENTRY from the Step 7 command DEFINITION, which carries
+    # the identical command id followed by "title" instead.
+    _cm_grepz "$package"  '"claude-vscode\.renameTab",\s*"when":\s*"activeWebviewPanelId' "package.json: right-click context menu ENTRY"
 
     # --- resource file ---
     _cm_file "$resources/claude-logo-busy.svg"                                 "resources: claude-logo-busy.svg exists"

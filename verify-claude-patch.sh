@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Self-test for the Claude Code VS Code extension patch.
 #
-# Asserts the COMPLETE marker set (all 15 — every patch step), not the smaller
+# Asserts the COMPLETE marker set (all 16 — every patch step), not the smaller
 # subset the auto-patcher uses for its is-it-patched decision. Run it any time:
 #
 #   ./verify-claude-patch.sh

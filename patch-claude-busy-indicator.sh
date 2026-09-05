@@ -441,7 +441,24 @@ perl -e '
 ' "$EXTENSION" || fail "Step 3a: isBusy in lastRenameTabFlags (extension.js)"
 
 # Step 3b: add the busy branch to the icon selection.
-# Dynamically detect the minified variable names (they change between versions)
+# Dynamically detect the minified variable names (they change between versions).
+#
+# 2.1.261 moved the goalposts AGAIN. Upstream replaced the if/else assignment
+# chain with a pure CLASSIFIER that returns a key, plus a separate lookup table:
+#     function ug$(F,anchor,helpers){if(F?.hasPendingPermissions)return"pending";
+#                                    ...return"done";return"plain"}
+#     var mg$={pending:"claude-logo-pending.svg",done:"...",plain:"claude-logo.svg"};
+# The old anchor required X="claude-logo-pending.svg";else if(...) — text that no
+# longer exists anywhere in the bundle, so Step 3b failed with "could not detect
+# variable names" on 2.1.261. Shape A below handles the classifier form; shape B
+# is the pre-2.1.261 inline chain, kept so 2.1.246/2.1.251/2.1.260 still patch.
+#
+# Shape A needs TWO edits — a busy arm in the classifier AND a busy entry in the
+# table — and either one alone is worse than neither: an arm returning a key the
+# table lacks makes mg$[key] undefined (join() throws on the icon path), and a
+# table entry no arm ever returns is a dead branch that can never fire. So the
+# file is written only if BOTH substitutions succeed, and each gets its own
+# marker — same rule as the 2.1.260 feed/branch split in Step 3a.
 perl -e '
   open F, "<", $ARGV[0] or die; local $/; $c = <F>; close F;
 
@@ -450,10 +467,40 @@ perl -e '
     exit 0;
   }
 
-  # One anchor, both upstream shapes — capture the flags ACCESSOR whole so the
-  # injected test is written in the same dialect as the branches around it:
+  # --- Shape A: 2.1.261+ classifier + lookup table ---
+  # Arity is left open ((?:,[\w\$]+)*) so an extra upstream helper param does not
+  # break detection; the backreference to the first param is what actually pins
+  # this to the icon classifier.
+  if ($c =~ /function ([\w\$]+)\(([\w\$]+)(?:,[\w\$]+)*\)\{if\(\2\?\.hasPendingPermissions\)return"pending";/) {
+    my ($fn, $flags) = ($1, $2);
+    my $map;
+    if ($c =~ /var ([\w\$]+)=\{pending:"claude-logo-pending\.svg",done:"claude-logo-done\.svg",plain:"claude-logo\.svg"\}/) {
+      $map = $1;
+    } else {
+      print STDERR "  *** icon selection: classifier found but icon table did not match\n";
+      exit 1;
+    }
+    my $fn_re  = quotemeta($fn);
+    my $map_re = quotemeta($map);
+    my $arm = 0; my $tab = 0;
+    # Insert ahead of the final return, so precedence stays pending > done >
+    # busy > plain — the same order the inline chain used.
+    $arm = 1 if $c =~ s/(function $fn_re\(.*?)return"plain"\}/${1}if(${flags}?.isBusy)return"busy";return"plain"}/s;
+    $tab = 1 if $c =~ s/(var $map_re=\{pending:"claude-logo-pending\.svg",done:"claude-logo-done\.svg",plain:"claude-logo\.svg")\}/${1},busy:"claude-logo-busy.svg"}/;
+    if ($arm && $tab) {
+      open F, ">", $ARGV[0] or die; print F $c; close F;
+      print STDERR "  - icon selection patched, shape A (fn=$fn, flags=$flags, table=$map)\n";
+      exit 0;
+    }
+    print STDERR "  *** icon selection: shape A substitution failed (arm=$arm table=$tab)\n";
+    exit 1;
+  }
+
+  # --- Shape B: pre-2.1.261 inline if/else chain ---
+  # One anchor, both older upstream shapes — capture the flags ACCESSOR whole so
+  # the injected test is written in the same dialect as the branches around it:
   #   <= 2.1.251  "$.request" . hasPendingPermissions  (inline in the handler)
-  #   >= 2.1.260  "$?"        . hasPendingPermissions  (applyTabIcon())
+  #      2.1.260  "$?"        . hasPendingPermissions  (applyTabIcon())
   # The done-branch condition is captured too: 2.1.260 hoisted it into a local
   # ("else if(J)") instead of testing the request field inline.
   if ($c =~ /([\w\$]+(?:\.request|\?))\.hasPendingPermissions\)([\w\$]+)="claude-logo-pending\.svg";else if\(([^()]+)\)\2="claude-logo-done\.svg";else \2="claude-logo\.svg"/) {
@@ -463,9 +510,9 @@ perl -e '
     my $old_re = quotemeta($old);
     if ($c =~ s/$old_re/$new/) {
       open F, ">", $ARGV[0] or die; print F $c; close F;
-      print STDERR "  - icon selection patched (flags=$flags_acc, icon=$icon_var)\n";
+      print STDERR "  - icon selection patched, shape B (flags=$flags_acc, icon=$icon_var)\n";
     } else {
-      print STDERR "  *** icon selection: substitution failed\n";
+      print STDERR "  *** icon selection: shape B substitution failed\n";
       exit 1;
     }
   } else {
@@ -480,17 +527,21 @@ echo "Patching extension.js for rename tab..."
 perl -e '
   open F, "<", $ARGV[0] or die; local $/; $c = <F>; close F;
 
-  if ($c =~ /_customTitle\|\|[\w\$]+\.request\.title/) {
+  if ($c =~ /_customTitle\|\|(?:[\w\$]+\()?[\w\$]+\.request\.title/) {
     print STDERR "  - sticky custom title: already patched\n";
     exit 0;
   }
 
   if ($c =~ /([\w\$]+)\.request\.type==="rename_tab"/) {
     my $req_var = $1;
-    my $old = "this.panelTab.title=${req_var}.request.title";
-    my $new = "this.panelTab.title=this._customTitle||${req_var}.request.title";
-    my $old_re = quotemeta($old);
-    if ($c =~ s/$old_re/$new/) {
+    my $req_re  = quotemeta($req_var);
+    # 2.1.261 wraps the incoming title in a clamp helper — gJ($.request.title),
+    # where gJ truncates to 200 chars — so the bare assignment this step used to
+    # anchor on ("this.panelTab.title=$.request.title") no longer exists and the
+    # substitution silently failed. Match either dialect and KEEP whatever
+    # upstream wrapped it in on the fallback arm: the custom title still wins,
+    # and an upstream-supplied title is still clamped exactly as upstream meant.
+    if ($c =~ s/this\.panelTab\.title=([\w\$]+\($req_re\.request\.title\)|$req_re\.request\.title)/this.panelTab.title=this._customTitle||$1/) {
       open F, ">", $ARGV[0] or die; print F $c; close F;
       print STDERR "  - sticky custom title patched (var: $req_var)\n";
     } else {
@@ -677,36 +728,57 @@ perl -e '
 ' "$PACKAGE" || fail "Step 7: package.json command"
 
 # --- Step 8: Patch package.json — add right-click context menu for rename ---
+# 2.1.261 ships its OWN "editor/title/context" section (renameSessionTab,
+# addSessionTabToGroup, markSessionUnread). The old guard tested for that
+# section NAME, so it declared "already patched" and inserted nothing — the
+# right-click Rename Tab entry silently vanished — while the old marker tested
+# the same section name, matched upstream's own text and reported green. That is
+# the 2.1.167 false-pass all over again, in the very step it was found in.
+#
+# The guard now asks the only question that distinguishes patched from vanilla:
+# is OUR command in that menu array? Parsed as JSON, not string-matched, because
+# "claude-vscode.renameTab" also appears in the Step 7 command DEFINITION and a
+# bare substring test would go green on Step 7 alone. Insertion appends into an
+# existing section and only creates one when upstream ships none.
 echo "Patching package.json context menu..."
 
 python3 -c '
-import sys
+import json, sys
 
-with open(sys.argv[1], "r") as f:
+path = sys.argv[1]
+with open(path, "r") as f:
     c = f.read()
 
-if "editor/title/context" in c:
+SECTION = "editor/title/context"
+CMD = "claude-vscode.renameTab"
+
+menus = json.loads(c).get("contributes", {}).get("menus", {})
+if any(e.get("command") == CMD for e in menus.get(SECTION, [])):
     print("  - context menu: already patched", file=sys.stderr)
     sys.exit(0)
 
-old = "\t\t\t\"editor/title\": ["
-new = """\t\t\t"editor/title/context": [
-\t\t\t\t{
+entry = """\t\t\t\t{
 \t\t\t\t\t"command": "claude-vscode.renameTab",
 \t\t\t\t\t"when": "activeWebviewPanelId == '"'"'claudeVSCodePanel'"'"'",
 \t\t\t\t\t"group": "2_claude"
-\t\t\t\t}
-\t\t\t],
-\t\t\t"editor/title": ["""
+\t\t\t\t},"""
 
-if old in c:
-    c = c.replace(old, new, 1)
-    with open(sys.argv[1], "w") as f:
-        f.write(c)
-    print("  - context menu added", file=sys.stderr)
+header = "\t\t\t\"" + SECTION + "\": ["
+if header in c:
+    c = c.replace(header, header + "\n" + entry, 1)
+    how = "appended to upstream section"
 else:
-    print("  *** context menu: anchor pattern not found", file=sys.stderr)
-    sys.exit(1)
+    anchor = "\t\t\t\"editor/title\": ["
+    if anchor not in c:
+        print("  *** context menu: anchor pattern not found", file=sys.stderr)
+        sys.exit(1)
+    c = c.replace(anchor, header + "\n" + entry.rstrip(",") + "\n\t\t\t],\n" + anchor, 1)
+    how = "section created"
+
+json.loads(c)   # refuse to write anything that is not valid JSON
+with open(path, "w") as f:
+    f.write(c)
+print("  - context menu added (" + how + ")", file=sys.stderr)
 ' "$PACKAGE" || fail "Step 8: package.json context menu"
 
 # --- Step 9: Post-patch verification (shared marker set) ---
