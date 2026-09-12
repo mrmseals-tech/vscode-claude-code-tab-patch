@@ -38,6 +38,7 @@ loudly instead of silently dropping a feature.
 ## Requirements
 
 `bash`, `perl`, `python3`, `grep -P` (GNU grep). Linux/macOS. `notify-send` optional.
+`node` optional — without it the icon-precedence behaviour test is skipped (and says so).
 
 ## Install
 
@@ -83,8 +84,26 @@ Or just re-run `./patch-claude-busy-indicator.sh` by hand. It is idempotent.
 ./claude-rollback.sh       # restore vanilla files, then reload VS Code
 ```
 
-On failure the self-test writes a `claude-patch-BROKEN.flag` into the state directory and
-raises a persistent desktop notification, so a partial patch can't go unnoticed.
+The self-test runs two independent checks, because they answer different questions:
+
+1. **markers** — are our edits present? (greps, via `claude-patch-markers.sh`)
+2. **behaviour** — do they do the right thing? (`test-icon-precedence.js`)
+
+The second exists because the first cannot see ordering. The busy arm once sat below
+upstream's `done` arm, so a tab stayed orange for the entire turn while all 16 markers
+reported green. The behaviour test pulls the real classifier out of the built
+`extension.js`, evaluates it, and asserts which icon each flag combination resolves to —
+including the exact case that regressed. It covers both upstream dialects (the 2.1.261+
+keyed classifier and the older inline `if/else` chain). Run it directly against any build:
+
+```bash
+node test-icon-precedence.js ~/.vscode/extensions/anthropic.claude-code-*/extension.js
+# exit 0 = correct, 1 = present but wrong precedence, 2 = our arm is not there
+```
+
+On failure either check writes a `claude-patch-BROKEN.flag` into the state directory and
+raises a persistent desktop notification, so a partial or misbehaving patch can't go
+unnoticed.
 
 ## Configuration
 
@@ -106,9 +125,10 @@ Set `CLAUDE_PATCH_EXT_DIR` for non-stock builds: `~/.vscode-insiders/extensions`
 | File | Role |
 | --- | --- |
 | `patch-claude-busy-indicator.sh` | The patcher — 9 steps plus verification |
-| `claude-patch-markers.sh` | Single source of truth for the 10 verification markers |
+| `claude-patch-markers.sh` | Single source of truth for the 16 verification markers |
 | `claude-patch-paths.sh` | Single source of truth for every path used |
 | `verify-claude-patch.sh` | Standalone self-test with visible escalation |
+| `test-icon-precedence.js` | Behaviour test: evaluates the real classifier and checks icon precedence |
 | `auto-patch-claude.sh` | Re-apply wrapper for the systemd units |
 | `claude-rollback.sh` | Break-glass restore from backup |
 
