@@ -485,37 +485,81 @@ perl -e '
 # table entry no arm ever returns is a dead branch that can never fire. So the
 # file is written only if BOTH substitutions succeed, and each gets its own
 # marker — same rule as the 2.1.260 feed/branch split in Step 3a.
+#
+# PRECEDENCE (changed 2026-09-12): pending > BUSY > done > plain.
+# The busy test must come BEFORE the done test. Until now it came after, which
+# made the badge wrong in a way that looked like the patch had stopped working:
+# upstream sets hasUnseenCompletion when a turn ends while the tab is not
+# visible, and clears it ONLY when the tab becomes visible -- nothing clears it
+# when the next turn starts. So a new task sent isBusy:true together with a
+# stale hasUnseenCompletion:true, "done" won, and the tab stayed ORANGE while
+# Claude was working. Clicking the tab cleared the flag and it went green, which
+# is exactly the "only updates when I click it" symptom. Upstream guards its own
+# done arm with Q?.state!=="running" for the same reason, but that state is not
+# set for background/agent work, so it does not cover us. Live state outranks a
+# stale notification: if Claude is working right now, the tab is green.
 perl -e '
   open F, "<", $ARGV[0] or die; local $/; $c = <F>; close F;
 
-  if ($c =~ /claude-logo-busy\.svg/) {
+  # Already patched AND in the correct order? Nothing to do. This tests the
+  # ORDER, not merely the presence of a busy branch -- an install patched by an
+  # older copy of this script has the branch but in the wrong place, and a guard
+  # that only looked for claude-logo-busy.svg would call that done and leave the
+  # stale-orange bug in place forever.
+  if ($c =~ /return"pending";if\([\w\$]+\?\.isBusy\)return"busy"/
+   || $c =~ /="claude-logo-pending\.svg";else if\([\w\$]+(?:\.request|\?)\.isBusy\)[\w\$]+="claude-logo-busy\.svg"/) {
     print STDERR "  - icon selection: already patched\n";
     exit 0;
   }
+
+  # Strip a busy branch left in the pre-2026-09-12 position (after the done
+  # test) so the insert below can place it correctly. This is what lets an
+  # already-patched extension upgrade IN PLACE, with no rollback: after the
+  # strip the file is, for this edit, shaped exactly like vanilla again.
+  my $moved = 0;
+  $moved = 1 if $c =~ s/if\([\w\$]+\?\.isBusy\)return"busy";(?=return"plain"\})//;
+  $moved = 1 if $c =~ s/else if\([\w\$]+(?:\.request|\?)\.isBusy\)([\w\$]+)="claude-logo-busy\.svg";(?=else \1="claude-logo\.svg")//;
 
   # --- Shape A: 2.1.261+ classifier + lookup table ---
   # Arity is left open ((?:,[\w\$]+)*) so an extra upstream helper param does not
   # break detection; the backreference to the first param is what actually pins
   # this to the icon classifier.
-  if ($c =~ /function ([\w\$]+)\(([\w\$]+)(?:,[\w\$]+)*\)\{if\(\2\?\.hasPendingPermissions\)return"pending";/) {
-    my ($fn, $flags) = ($1, $2);
+  if ($c =~ /(function ([\w\$]+)\(([\w\$]+)(?:,[\w\$]+)*\)\{if\(\3\?\.hasPendingPermissions\)return"pending";)/) {
+    my ($head, $fn, $flags) = ($1, $2, $3);
     my $map;
-    if ($c =~ /var ([\w\$]+)=\{pending:"claude-logo-pending\.svg",done:"claude-logo-done\.svg",plain:"claude-logo\.svg"\}/) {
+    # No closing brace in this test: the table may already carry our busy entry
+    # from an earlier run whose arm we just stripped.
+    if ($c =~ /var ([\w\$]+)=\{pending:"claude-logo-pending\.svg",done:"claude-logo-done\.svg",plain:"claude-logo\.svg"/) {
       $map = $1;
     } else {
       print STDERR "  *** icon selection: classifier found but icon table did not match\n";
       exit 1;
     }
-    my $fn_re  = quotemeta($fn);
-    my $map_re = quotemeta($map);
+    my $map_re  = quotemeta($map);
+    my $head_re = quotemeta($head);
     my $arm = 0; my $tab = 0;
-    # Insert ahead of the final return, so precedence stays pending > done >
-    # busy > plain — the same order the inline chain used.
-    $arm = 1 if $c =~ s/(function $fn_re\(.*?)return"plain"\}/${1}if(${flags}?.isBusy)return"busy";return"plain"}/s;
-    $tab = 1 if $c =~ s/(var $map_re=\{pending:"claude-logo-pending\.svg",done:"claude-logo-done\.svg",plain:"claude-logo\.svg")\}/${1},busy:"claude-logo-busy.svg"}/;
+
+    # Busy entry in the lookup table: add it, or accept one already present.
+    if ($c =~ /var $map_re=\{[^}]*busy:"claude-logo-busy\.svg"/) {
+      $tab = 1;
+    } else {
+      $tab = 1 if $c =~ s/(var $map_re=\{pending:"claude-logo-pending\.svg",done:"claude-logo-done\.svg",plain:"claude-logo\.svg")\}/${1},busy:"claude-logo-busy.svg"}/;
+    }
+
+    # Busy arm goes immediately AFTER the pending arm: pending > busy > done >
+    # plain. Assert the head is unique first -- it is the whole anchor here, and
+    # a repeated one would put the arm in some other function entirely.
+    my $n = 0; my $at = 0;
+    while (($at = index($c, $head, $at)) >= 0) { $n++; $at += length($head); }
+    if ($n != 1) {
+      print STDERR "  *** icon selection: expected 1 classifier head, found $n\n";
+      exit 1;
+    }
+    $arm = 1 if $c =~ s/$head_re/${head}if(${flags}?.isBusy)return"busy";/;
+
     if ($arm && $tab) {
       open F, ">", $ARGV[0] or die; print F $c; close F;
-      print STDERR "  - icon selection patched, shape A (fn=$fn, flags=$flags, table=$map)\n";
+      print STDERR "  - icon selection patched, shape A (fn=$fn, flags=$flags, table=$map)" . ($moved ? " [busy arm relocated ahead of done]" : "") . "\n";
       exit 0;
     }
     print STDERR "  *** icon selection: shape A substitution failed (arm=$arm table=$tab)\n";
@@ -531,12 +575,13 @@ perl -e '
   # ("else if(J)") instead of testing the request field inline.
   if ($c =~ /([\w\$]+(?:\.request|\?))\.hasPendingPermissions\)([\w\$]+)="claude-logo-pending\.svg";else if\(([^()]+)\)\2="claude-logo-done\.svg";else \2="claude-logo\.svg"/) {
     my ($flags_acc, $icon_var, $done_cond) = ($1, $2, $3);
-    my $old = qq{else if(${done_cond})${icon_var}="claude-logo-done.svg";else ${icon_var}="claude-logo.svg"};
-    my $new = qq{else if(${done_cond})${icon_var}="claude-logo-done.svg";else if(${flags_acc}.isBusy)${icon_var}="claude-logo-busy.svg";else ${icon_var}="claude-logo.svg"};
+    # Busy BEFORE done here too -- same precedence rule as shape A.
+    my $old = qq{${icon_var}="claude-logo-pending.svg";else if(${done_cond})};
+    my $new = qq{${icon_var}="claude-logo-pending.svg";else if(${flags_acc}.isBusy)${icon_var}="claude-logo-busy.svg";else if(${done_cond})};
     my $old_re = quotemeta($old);
     if ($c =~ s/$old_re/$new/) {
       open F, ">", $ARGV[0] or die; print F $c; close F;
-      print STDERR "  - icon selection patched, shape B (flags=$flags_acc, icon=$icon_var)\n";
+      print STDERR "  - icon selection patched, shape B (flags=$flags_acc, icon=$icon_var)" . ($moved ? " [busy arm relocated ahead of done]" : "") . "\n";
     } else {
       print STDERR "  *** icon selection: shape B substitution failed\n";
       exit 1;

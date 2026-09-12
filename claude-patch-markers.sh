@@ -91,7 +91,15 @@ claude_check_markers() {
     # alternative in each is the pre-2.1.261 inline shape, where one assignment
     # is genuinely both halves.
     _cm_grep "$extension" 'busy:"claude-logo-busy\.svg"|="claude-logo-busy\.svg"'  "extension: busy icon selection"
-    _cm_grep "$extension" 'isBusy\)return"busy"|\.isBusy\)[\w\$]+="claude-logo-busy\.svg"' "extension: busy branch reaches icon"
+    # This asserts the busy branch sits immediately after the PENDING branch, not
+    # merely that it exists somewhere. Order is load-bearing: with busy after the
+    # done test, a turn that finished while the tab was hidden leaves
+    # hasUnseenCompletion set (upstream clears it only on visibility), so the next
+    # turn renders "done" -- an orange tab while Claude is actively working, going
+    # green only when clicked. A presence-only marker passes happily over that, so
+    # it would have shipped the bug as green. Second alternative: the pre-2.1.261
+    # inline chain, same rule (busy branch directly after the pending assignment).
+    _cm_grep "$extension" 'return"pending";if\([\w\$]+\?\.isBusy\)return"busy"|="claude-logo-pending\.svg";else if\([\w\$]+(?:\.request|\?)\.isBusy\)[\w\$]+="claude-logo-busy\.svg"' "extension: busy branch outranks done"
     # [\w\$]+ not \w+: a minified identifier can be "$" (esbuild names the message
     # handler binding "$" as of 2.1.245), which \w does not match. Same reason as
     # the IDENTIFIER CHARSET note in patch-claude-busy-indicator.sh.
