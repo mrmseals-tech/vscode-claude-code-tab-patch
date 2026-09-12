@@ -385,6 +385,20 @@ perl -e '
 # readMessages finally block (stream ended) and on restart, and already clears
 # busy and subagentTasks there. Without this the badge could stay lit after a
 # crash that never delivers the closing background_tasks_changed.
+#
+# 2.1.268 hoisted "this.busy.value=!1" OUT of this body into a new
+#   endTurn(){this.busy.value=!1,this.localTurnStarted=!1,this.turnHadToolRound=!1}
+# which resetPerProcessState() now calls first. The old anchor (that assignment)
+# therefore matched nothing and this step failed -- 15/16, caught by the flag.
+# We now anchor on the METHOD HEAD, which is shape-agnostic: it covers 2.1.268
+# and every older dialect, and on the pre-2.1.268 shape the emitted bytes are
+# unchanged from the known-good patch.
+#
+# DO NOT follow busy into endTurn(). Upstream calls endTurn() on every "result"
+# message, not just at process end, so clearing _bgBusy there would drop the
+# badge the moment the parent turn ends while a background subagent is still
+# running -- reinstating the exact bug _bgBusy was added to fix, with all 16
+# markers still green. Process-end semantics live in resetPerProcessState().
 perl -e '
   open F, "<", $ARGV[0] or die; local $/; $c = <F>; close F;
 
@@ -393,8 +407,20 @@ perl -e '
     exit 0;
   }
 
-  my $old = "resetPerProcessState(){if(this.busy.value=!1,";
-  my $new = "resetPerProcessState(){if(this._bgBusy.value=!1,this.busy.value=!1,";
+  my $old = "resetPerProcessState(){if(";
+  my $new = "resetPerProcessState(){if(this._bgBusy.value=!1,";
+
+  # The head is shorter than the old anchor, so assert it is still unique before
+  # substituting -- a future shape that repeats it would otherwise silently take
+  # the clear to the wrong call site, and the marker could not tell the
+  # difference.
+  my $n = 0; my $at = 0;
+  while (($at = index($c, $old, $at)) >= 0) { $n++; $at += length($old); }
+  if ($n != 1) {
+    print STDERR "  *** _bgBusy reset: expected 1 resetPerProcessState anchor, found $n\n";
+    exit 1;
+  }
+
   my $old_re = quotemeta($old);
   if ($c =~ s/$old_re/$new/) {
     open F, ">", $ARGV[0] or die; print F $c; close F;
