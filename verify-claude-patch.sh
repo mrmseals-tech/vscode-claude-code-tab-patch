@@ -33,6 +33,12 @@ FLAG="$CLAUDE_PATCH_FLAG"
 ROLLBACK="$HERE/claude-rollback.sh"
 
 notify_critical() {  # title body
+    # CLAUDE_PATCH_NO_NOTIFY=1 suppresses desktop notifications. Set it when
+    # exercising the failure path in a test: notify-send talks to the SESSION
+    # D-BUS, which a fake $HOME does NOT sandbox, so a sandboxed failing run
+    # otherwise raises a persistent critical "BROKEN" popup on the real desktop
+    # for an extension that is perfectly healthy. (That happened.)
+    [[ -n "${CLAUDE_PATCH_NO_NOTIFY:-}" ]] && return 0
     command -v notify-send &>/dev/null || return 0
     notify-send -u critical -t 0 "$1" "$2" 2>/dev/null || true
 }

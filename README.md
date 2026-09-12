@@ -116,9 +116,16 @@ All paths are environment-overridable; nothing assumes a checkout location.
 | `CLAUDE_PATCH_FLAG` | `$CLAUDE_PATCH_STATE_DIR/claude-patch-BROKEN.flag` |
 | `CLAUDE_PATCH_EXT_DIR` | `~/.vscode/extensions` |
 | `CLAUDE_PATCH_EXT_PATTERN` | `anthropic.claude-code-*` |
+| `CLAUDE_PATCH_NO_NOTIFY` | unset — set to `1` to suppress desktop notifications |
 
 Set `CLAUDE_PATCH_EXT_DIR` for non-stock builds: `~/.vscode-insiders/extensions`,
 `~/.vscode-oss/extensions`, `~/.vscode-server/extensions`, `~/.cursor/extensions`.
+
+Set `CLAUDE_PATCH_NO_NOTIFY=1` when testing the failure path. `notify-send` talks to
+the session D-Bus, which overriding `$HOME` or the state dir does **not** sandbox, so a
+sandboxed failing run otherwise raises a persistent critical "BROKEN" popup about an
+extension that is perfectly healthy. It suppresses only the popup: exit status, the
+BROKEN flag and all output are unchanged.
 
 ## Files
 

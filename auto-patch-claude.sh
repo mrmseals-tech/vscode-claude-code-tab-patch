@@ -94,7 +94,9 @@ fi
 # unnoticed again.
 if bash "$HERE/verify-claude-patch.sh"; then
     log "Self-test PASSED — fully patched and verified"
-    if command -v notify-send &>/dev/null; then
+    # Same CLAUDE_PATCH_NO_NOTIFY escape hatch as verify-claude-patch.sh: a
+    # test run of this unit should not pop a notification on the real desktop.
+    if [[ -z "${CLAUDE_PATCH_NO_NOTIFY:-}" ]] && command -v notify-send &>/dev/null; then
         notify-send -u normal -t 10000 \
             "Claude Code Patched" \
             "$(basename "$EXT_PATH") patched and verified.\nReload VS Code to apply."
