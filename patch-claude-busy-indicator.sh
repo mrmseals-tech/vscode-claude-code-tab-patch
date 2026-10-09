@@ -310,15 +310,24 @@ perl -e '
     exit 0;
   }
 
-  # busy and pendingInput are declared adjacently in the session class. Requiring
-  # BOTH, with a back-reference on the factory, pins the session class rather than
-  # matching any incidental "busy=X(!1)" elsewhere in the bundle.
-  if ($c =~ /busy=([\w\$]+)\(!1\);pendingInput=\1\(!1\)/) {
+  # busy and pendingInput are declared close together in the session class.
+  # Requiring BOTH, with a back-reference on the factory, pins the session class
+  # rather than matching any incidental "busy=X(!1)" elsewhere in the bundle.
+  # They are NOT necessarily adjacent: 2.1.295 inserted
+  # "visiblyBusy=O5(()=>this.busy.value&&...)" between them, so allow a short
+  # semicolon-free-field gap and insert _bgBusy directly after busy. The gap may
+  # not cross another busy=/pendingInput= field, so a second session-shaped
+  # declaration is counted separately instead of being swallowed into the first.
+  my @hits = ($c =~ /(?<![\w\$])busy=([\w\$]+)\(!1\);(?:(?!busy=|pendingInput=)[\w\$]+=[^;]{0,300};){0,4}pendingInput=\1\(!1\)/g);
+  if (@hits > 1) {
+    print STDERR "  *** _bgBusy signal: expected 1 session busy declaration, found " . scalar(@hits) . "\n";
+    exit 1;
+  }
+  if ($c =~ /(?<![\w\$])busy=([\w\$]+)\(!1\);(?=(?:(?!busy=|pendingInput=)[\w\$]+=[^;]{0,300};){0,4}pendingInput=\1\(!1\))/) {
     my $sig = $1;
-    my $old = "busy=${sig}(!1);pendingInput=${sig}(!1)";
-    my $new = "busy=${sig}(!1);_bgBusy=${sig}(!1);pendingInput=${sig}(!1)";
-    my $old_re = quotemeta($old);
-    if ($c =~ s/$old_re/$new/) {
+    my $sig_re = quotemeta($sig);
+    my $new = "busy=${sig}(!1);_bgBusy=${sig}(!1);";
+    if ($c =~ s/(?<![\w\$])busy=${sig_re}\(!1\);(?=(?:(?!busy=|pendingInput=)[\w\$]+=[^;]{0,300};){0,4}pendingInput=${sig_re}\(!1\))/$new/) {
       open F, ">", $ARGV[0] or die; print F $c; close F;
       print STDERR "  - _bgBusy signal added (factory=$sig)\n";
     } else {
