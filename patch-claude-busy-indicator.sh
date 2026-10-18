@@ -107,7 +107,9 @@ echo "Patching webview/index.js..."
 perl -e '
   open F, "<", $ARGV[0] or die; local $/; $c = <F>; close F;
 
-  if ($c =~ /isBusy:[^\s}]+\}/) {
+  # Anchor to rename_tab: 2.1.301 has an unrelated isBusy:...} prop that a bare
+  # match mistook for this edit, so the edit was skipped and the badge died.
+  if ($c =~ /type:"rename_tab",[^}]*isBusy:[^\s,}]+\}/) {
     print STDERR "  - renameTab method: already patched\n";
     exit 0;
   }

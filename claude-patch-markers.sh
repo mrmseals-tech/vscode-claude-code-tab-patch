@@ -57,7 +57,9 @@ claude_check_markers() {
     }
 
     # --- webview/index.js ---
-    _cm_grep "$webview"   'isBusy:[^\s}]+\}'                                     "webview: renameTab method has isBusy param"
+    # Anchored to the rename_tab request: 2.1.301 added an unrelated isBusy:...} prop
+    # elsewhere in the webview, which a bare isBusy match mistook for this edit.
+    _cm_grep "$webview"   'type:"rename_tab",[^}]*isBusy:[^\s,}]+\}'          "webview: renameTab method has isBusy param"
     # Pattern A (older): busy.value passed inline. Pattern B (2.1.167+): read into
     # _isBusy before the untracked wrapper. Either form is correctly patched.
     _cm_grep "$webview"   '_isBusy=.*?busy\.value|\.renameTab\([^)]*busy\.value' "webview: reactive watcher passes busy.value"
